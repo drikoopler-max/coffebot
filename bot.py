@@ -15,7 +15,12 @@ from telegram.ext import (
     filters,
 )
 
+# ----------- CONFIG -----------
+
 TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise RuntimeError("TOKEN is not set in environment variables")
+
 DB_NAME = "coffee.db"
 
 logging.basicConfig(
@@ -47,47 +52,23 @@ def init_db():
     )
     """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS ingredients (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        name TEXT,
-        price_per_kg REAL,
-        unit TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS drink_ingredients (
-        drink_id INTEGER,
-        ingredient_id INTEGER,
-        amount REAL
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS cafe_settings (
-        user_id INTEGER PRIMARY KEY,
-        salary_per_hour REAL,
-        overhead_month REAL,
-        cups_per_month INTEGER,
-        packaging_cost REAL
-    )
-    """)
-
     conn.commit()
     conn.close()
 
 # ----------- HELPERS -----------
 
-def get_user_id(telegram_id):
+def get_user_id(telegram_id: int) -> int:
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
+
     cur.execute("SELECT id FROM users WHERE telegram_id=?", (telegram_id,))
     row = cur.fetchone()
 
-    if not row:
-        cur.execute("INSERT INTO users (telegram_id) VALUES (?)", (telegram_id,))
+    if row is None:
+        cur.execute(
+            "INSERT INTO users (telegram_id) VALUES (?)",
+            (telegram_id,),
+        )
         conn.commit()
         user_id = cur.lastrowid
     else:
@@ -98,12 +79,7 @@ def get_user_id(telegram_id):
 
 # ----------- STATES -----------
 
-(
-    ADD_DRINK_NAME,
-    ADD_DRINK_VOLUME,
-    ADD_DRINK_CATEGORY,
-    CALC_MARGIN,
-) = range(4)
+ADD_DRINK_NAME, ADD_DRINK_VOLUME, ADD_DRINK_CATEGORY, CALC_MARGIN = range(4)
 
 # ----------- COMMANDS -----------
 
@@ -113,43 +89,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ["➕ Додати напій", "📋 Мої напої"],
         ["💰 Розрахувати ціну"],
-        ["🧂 База інгредієнтів", "⚙️ Налаштування"]
     ]
+
     await update.message.reply_text(
         "☕ Вітаю! Я бот для розрахунку собівартості кавових напоїв.",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
     )
 
 # ----------- ADD DRINK -----------
 
 async def add_drink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введи назву напою:", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "Введи назву напою:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return ADD_DRINK_NAME
 
 async def add_drink_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["drink_name"] = update.message.text
+    context.user_data["drink_name"] = update.message.text.strip()
     await update.message.reply_text("Обʼєм напою (мл):")
     return ADD_DRINK_VOLUME
 
 async def add_drink_volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["drink_volume"] = int(update.message.text)
+    try:
+        volume = int(update.message.text)
+    except ValueError:
+        await update.message.reply_text("❌ Введи число, наприклад: 250")
+        return ADD_DRINK_VOLUME
+
+    context.user_data["drink_volume"] = volume
     await update.message.reply_text("Категорія (кава / чай / інше):")
     return ADD_DRINK_CATEGORY
 
 async def add_drink_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id)
+
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO drinks (user_id, name, volume, category)
         VALUES (?, ?, ?, ?)
-    """, (
-        user_id,
-        context.user_data["drink_name"],
-        context.user_data["drink_volume"],
-        update.message.text
-    ))
+        """,
+        (
+            user_id,
+            context.user_data["drink_name"],
+            context.user_data["drink_volume"],
+            update.message.text.strip(),
+        ),
+    )
 
     conn.commit()
     conn.close()
@@ -164,8 +153,13 @@ async def calculate_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CALC_MARGIN
 
 async def calc_margin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    margin = float(update.message.text) / 100
-    cost = 30.0  # DEMO (можна замінити повним розрахунком)
+    try:
+        margin = float(update.message.text) / 100
+    except ValueError:
+        await update.message.reply_text("❌ Введи число, наприклад 70")
+        return CALC_MARGIN
+
+    cost = 30.0
     price = cost / (1 - margin)
 
     await update.message.reply_text(
@@ -177,7 +171,7 @@ async def calc_margin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------- ERROR -----------
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception:", exc_info=context.error)
+    logger.error("Exception occurred", exc_info=context.error)
 
 # ----------- MAIN -----------
 
@@ -187,19 +181,29 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     add_drink_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & filters.Regex("Додати напій"), add_drink_start)],
+        entry_points=[
+            MessageHandler(
+                filters.TEXT & filters.Regex("^➕ Додати напій$"),
+                add_drink_start,
+            )
+        ],
         states={
-            ADD_DRINK_NAME: [MessageHandler(filters.TEXT, add_drink_name)],
-            ADD_DRINK_VOLUME: [MessageHandler(filters.TEXT, add_drink_volume)],
-            ADD_DRINK_CATEGORY: [MessageHandler(filters.TEXT, add_drink_category)],
+            ADD_DRINK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_drink_name)],
+            ADD_DRINK_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_drink_volume)],
+            ADD_DRINK_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_drink_category)],
         },
         fallbacks=[],
     )
 
     calc_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & filters.Regex("Розрахувати ціну"), calculate_price)],
+        entry_points=[
+            MessageHandler(
+                filters.TEXT & filters.Regex("^💰 Розрахувати ціну$"),
+                calculate_price,
+            )
+        ],
         states={
-            CALC_MARGIN: [MessageHandler(filters.TEXT, calc_margin)],
+            CALC_MARGIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_margin)],
         },
         fallbacks=[],
     )
